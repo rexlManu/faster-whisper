@@ -1,4 +1,5 @@
 import itertools
+import json
 import logging
 import os
 import zlib
@@ -10,7 +11,7 @@ import numpy as np
 import tokenizers
 
 from faster_whisper.audio import decode_audio
-from faster_whisper.feature_extractor import FeatureExtractor
+from faster_whisper.feature_extractor import FeatureExtractor, FeatureExtractorOptions
 from faster_whisper.tokenizer import _LANGUAGE_CODES, Tokenizer
 from faster_whisper.utils import download_model, format_timestamp, get_logger
 from faster_whisper.vad import (
@@ -64,6 +65,7 @@ class TranscriptionOptions(NamedTuple):
     word_timestamps: bool
     prepend_punctuations: str
     append_punctuations: str
+    max_new_tokens: Optional[int]
 
 
 class TranscriptionInfo(NamedTuple):
@@ -87,13 +89,14 @@ class WhisperModel:
         num_workers: int = 1,
         download_root: Optional[str] = None,
         local_files_only: bool = False,
+        feat_parameters: Optional[Union[dict, FeatureExtractorOptions]] = None,
     ):
         """Initializes the Whisper model.
 
         Args:
           model_size_or_path: Size of the model to use (tiny, tiny.en, base, base.en,
-            small, small.en, medium, medium.en, large-v1, large-v2, or large), a path to a converted
-            model directory, or a CTranslate2-converted Whisper model ID from the Hugging Face Hub.
+            small, small.en, medium, medium.en, large-v1, large-v2, large-v3, or large), a path to a
+            converted model directory, or a CTranslate2-converted Whisper model ID from the HF Hub
             When a size or a model ID is configured, the converted model is downloaded
             from the Hugging Face Hub.
           device: Device to use for computation ("cpu", "cuda", "auto").
@@ -113,6 +116,9 @@ class WhisperModel:
             are saved in the standard Hugging Face cache directory.
           local_files_only:  If True, avoid downloading the file and return the path to the
             local cached file if it exists.
+          feature_size: Number of mel filters to use for feature extraction. If not set,
+            the number of mel filters is inferred from the model version. The first release
+            used 80 bins, but the large-v3 model uses 128 bins.
         """
         self.logger = get_logger()
 
@@ -142,7 +148,12 @@ class WhisperModel:
                 "openai/whisper-tiny" + ("" if self.model.is_multilingual else ".en")
             )
 
-        self.feature_extractor = FeatureExtractor()
+        if feat_parameters is None:
+            feat_options = FeatureExtractorOptions()
+        elif isinstance(feat_parameters, dict):
+            feat_options = FeatureExtractorOptions(**feat_parameters)
+        self.feature_extractor = FeatureExtractor(feat_options)
+
         self.num_samples_per_token = self.feature_extractor.hop_length * 2
         self.frames_per_second = (
             self.feature_extractor.sampling_rate // self.feature_extractor.hop_length
@@ -194,6 +205,7 @@ class WhisperModel:
         append_punctuations: str = "\"'.。,，!！?？:：”)]}、",
         vad_filter: bool = False,
         vad_parameters: Optional[Union[dict, VadOptions]] = None,
+        max_new_tokens: Optional[int] = None,
     ) -> Tuple[Iterable[Segment], TranscriptionInfo]:
         """Transcribes an input file.
 
@@ -245,6 +257,8 @@ class WhisperModel:
             https://github.com/snakers4/silero-vad.
           vad_parameters: Dictionary of Silero VAD parameters or VadOptions class (see available
             parameters and default values in the class `VadOptions`).
+          max_new_tokens: Maximum number of new tokens to generate. If not set, the maximum will be
+            set by the default max_length of the model.
 
         Returns:
           A tuple with:
@@ -360,6 +374,7 @@ class WhisperModel:
             word_timestamps=word_timestamps,
             prepend_punctuations=prepend_punctuations,
             append_punctuations=append_punctuations,
+            max_new_tokens=max_new_tokens,
         )
 
         segments = self.generate_segments(features, tokenizer, options, encoder_output)
@@ -623,6 +638,10 @@ class WhisperModel:
         max_initial_timestamp_index = int(
             round(options.max_initial_timestamp / self.time_precision)
         )
+        if options.max_new_tokens is not None:
+            max_length = min(self.max_length, len(prompt) + options.max_new_tokens)
+        else:
+            max_length = self.max_length
 
         for temperature in options.temperatures:
             if temperature > 0:
@@ -644,7 +663,7 @@ class WhisperModel:
                 length_penalty=options.length_penalty,
                 repetition_penalty=options.repetition_penalty,
                 no_repeat_ngram_size=options.no_repeat_ngram_size,
-                max_length=self.max_length,
+                max_length=max_length,
                 return_scores=True,
                 return_no_speech_prob=True,
                 suppress_blank=options.suppress_blank,

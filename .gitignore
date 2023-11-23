@@ -3,6 +3,7 @@
 *.pyo
 *.pyd
 __pycache__/
+*.egg-info
 
 # Distribution / Packaging
 venv/
@@ -13,3 +14,6 @@ venv/
 # Ignore IDE, Editor Files
 .idea/
 .vscode/
+
+build
+dist
